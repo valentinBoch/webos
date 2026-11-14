@@ -473,7 +473,7 @@ static void row_prefetch(Row *r, int slot, int from, int to) {
   if (from < 0) from = 0; if (to > r->items.n - 1) to = r->items.n - 1;
   prep_check(r); int same = r->pf[slot][0] == from && r->pf[slot][1] == to; if (same && !r->pfWait[slot]) return;
   r->pf[slot][0] = from; r->pf[slot][1] = to; int wait = 0;
-  int cw = (int)card_w(r), ch = (int)card_h(r), fit = r->wide ? 1 : 0;
+  int cw = (int)card_w(r), ch = (int)card_h(r), fit = r->wide ? 3 : 0;
   for (int i = from; i <= to; i++) { int hold, ch2; const CardPrep *cp = row_prep(r, i, 0, &hold, &ch2); if (!cp) continue; if (r->cpSt[i] != 1) wait = 1;
     if ((!same || ch2) && cp->pre[0]) img_get_shaped(cp->pre, cw, ch, CARD_R, fit); }
   r->pfWait[slot] = (unsigned char)wait;
@@ -561,7 +561,7 @@ static int first_cards(Board *b, int nrows) {
   for (int r = 0; r < b->n && seen < nrows; r++) { Row *row = &b->rows[r]; if (row->hidden || !row->items.n) continue; seen++;
     prep_check(row);
     for (int c = 0; c < 6 && c < row->items.n; c++) { want++; int hold; const CardPrep *cp = row_prep(row, c, 0, &hold, NULL); const char *src = cp ? cp->pre : "";
-      if (!*src) { got++; continue; } int cw = (int)card_w(row), ch = (int)card_h(row), fit = row->wide ? 1 : 0; /* the same shaped picture the card draws */
+      if (!*src) { got++; continue; } int cw = (int)card_w(row), ch = (int)card_h(row), fit = row->wide ? 3 : 0; /* the same shaped picture the card draws */
       img_get_shaped(src, cw, ch, CARD_R, fit); if (img_shaped_loaded(src, cw, ch, CARD_R, fit) || img_shaped_failed(src, cw, ch, CARD_R, fit)) got++; } }
   return seen && got >= want;
 }

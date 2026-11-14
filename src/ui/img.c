@@ -21,6 +21,7 @@
 #include "ui/palette.h"
 #include "stb_image_write.h"
 #include "src/webp/decode.h"
+#include "ui/resample_hq.h"
 
 /* area-average resample of the part (cx, cy, cw, ch) of the source to nw x nh (the pictures only ever
    shrink: posters arrive at 500x750 for a 264x396 card; a smaller source repeats pixels) */
@@ -93,6 +94,30 @@ static Img *find(const char *url, unsigned h) { for (Img *i = table[h % BUCKETS]
    small PNG for their transparency): the next visit decodes that in a few ms instead of the full-size original */
 typedef struct { unsigned char *b; size_t n, cap; } WBuf;
 static void wbuf_put(void *ctx, void *data, int size) { WBuf *w = ctx; if (w->n + size > w->cap) { w->cap = (w->n + size) * 2; w->b = realloc(w->b, w->cap); } memcpy(w->b + w->n, data, size); w->n += size; }
+/* Separate cache so the high-quality Continue Watching cards never load an old
+   JPEG90/area-average shaped texture. Other card caches remain unchanged. */
+static void resume_small_save(const Img *im, const unsigned char *px, int w, int h) {
+  if (!strncmp(im->src, "file://", 7) || w * h > 1280 * 720) return;
+  int opaque = 1;
+  for (long i = 3, n = (long)w * h * 4; i < n; i += 4)
+    if (px[i] != 255) { opaque = 0; break; }
+  WBuf b = { 0 }; int ok = 0;
+  if (opaque) {
+    unsigned char *rgb = malloc((size_t)w * h * 3);
+    if (!rgb) return;
+    for (long i = 0, n = (long)w * h; i < n; i++) {
+      rgb[3 * i] = px[4 * i]; rgb[3 * i + 1] = px[4 * i + 1]; rgb[3 * i + 2] = px[4 * i + 2];
+    }
+    ok = stbi_write_jpg_to_func(wbuf_put, &b, w, h, 3, rgb, 96);
+    free(rgb);
+  } else ok = stbi_write_png_to_func(wbuf_put, &b, w, h, 4, px, w * 4);
+  if (ok && b.n) {
+    char key[2400];
+    snprintf(key, sizeof key, "sm-resume-lanczos3-v1:%dx%d:%s", im->w, im->h, im->url);
+    cache_write(key, b.b, b.n);
+  }
+  free(b.b);
+}
 static void small_save(const Img *im, const unsigned char *px, int w, int h) {
   if (!strncmp(im->src, "file://", 7) || w * h > 1280 * 720) return;
   int opaque = 1; for (long i = 3, n = (long)w * h * 4; i < n; i += 4) if (px[i] != 255) { opaque = 0; break; }
@@ -102,6 +127,25 @@ static void small_save(const Img *im, const unsigned char *px, int w, int h) {
   else ok = stbi_write_png_to_func(wbuf_put, &b, w, h, 4, px, w * 4);
   if (ok && b.n) { char key[2400]; snprintf(key, sizeof key, "sm:%dx%d:%s", im->w, im->h, im->url); cache_write(key, b.b, b.n); }
   free(b.b);
+}
+static int resume_small_load(Img *im) {
+  char key[2400];
+  snprintf(key, sizeof key, "sm-resume-lanczos3-v1:%dx%d:%s", im->w, im->h, im->url);
+  size_t len = 0; unsigned char *data = cache_read(key, 14 * 86400, &len);
+  if (!data) return 0;
+  int w, h, ch;
+  unsigned char *px = stbi_load_from_memory(data, (int)len, &w, &h, &ch, 4);
+  free(data);
+  if (!px) return 0;
+  if (w != im->w || h != im->h) { free(px); return 0; }
+  if (im->wantPal && !im->palReady) {
+    int st = 1; while ((w / st) * (h / st) > 40000) st++;
+    palette_of(px, w, h, im->palAlpha, st, &im->pal); im->palReady = 1;
+  }
+  round_corners(px, w, h, im->radius);
+  im->aspect = (float)w / h;
+  im->px = px; im->pw = w; im->ph = h; im->pch = 4;
+  return 1;
 }
 static int small_load(Img *im) {
   char key[2400]; snprintf(key, sizeof key, "sm:%dx%d:%s", im->w, im->h, im->url);
@@ -118,7 +162,7 @@ static void dec_leave(void) { pthread_mutex_lock(&decMu); decBusy--; pthread_con
 static void load_(Img *im);
 static void decode_part(Img *im, unsigned char *data, size_t len, int fromNet, const char *key);
 static double mono_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec / 1e9; }
-static void load(Img *im) { dec_enter(); int ok = small_load(im); dec_leave(); if (!ok) load_(im); }
+static void load(Img *im) { dec_enter(); int ok = im->fit == 3 ? resume_small_load(im) : small_load(im); dec_leave(); if (!ok) load_(im); }
 static void load_(Img *im) {
   char key[2048]; snprintf(key, sizeof key, "img:%s", im->src);
   size_t len = 0; unsigned char *data = cache_read(key, 14 * 86400, &len);
@@ -136,6 +180,22 @@ static void decode_part(Img *im, unsigned char *data, size_t len, int fromNet, c
   free(data);
   if (!px) { fprintf(stderr, "[img] undecodable %s\n", im->src); im->fails++; im->failAt = mono_s(); im->state = 3; return; }
   if (im->wantPal && !im->palReady) { int st = 1; while ((w / st) * (h / st) > 40000) st++; palette_of(px, w, h, im->palAlpha, st, &im->pal); im->palReady = 1; }
+  if (im->fit == 3) { /* only wide Continue Watching cards: Lanczos3, mild unsharp, JPEG96 */
+    float ba = (float)im->w / im->h, ta = (float)w / h;
+    float cx = 0, cy = 0, cw = (float)w, ch = (float)h;
+    if (ta > ba) { cw = h * ba; cx = (w - cw) / 2; }
+    else if (ta < ba) { ch = w / ba; cy = (h - ch) / 2; }
+    unsigned char *out = sb_resample_lanczos3_rgba(px, w, h, cx, cy, cw, ch, im->w, im->h);
+    if (out) {
+      free(px);
+      sb_unsharp_mild_rgba(out, im->w, im->h);
+      resume_small_save(im, out, im->w, im->h);
+      round_corners(out, im->w, im->h, im->radius);
+      im->px = out; im->pw = im->w; im->ph = im->h; im->pch = 4; im->aspect = ba;
+      return;
+    }
+    /* Allocation failure: keep the existing area/bilinear path. */
+  }
   if (im->fit >= 0) { /* the exact box: crop (or stretch), scale, round the corners */
     float cx = 0, cy = 0, cw = (float)w, ch = (float)h, ba = (float)im->w / im->h, ta = (float)w / h;
     if (im->fit > 0) { if (ta > ba) { cw = h * ba; cx = (w - cw) / 2; } else if (ta < ba) { ch = w / ba; cy = im->fit == 2 ? 0 : (h - ch) / 2; } }

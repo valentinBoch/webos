@@ -214,7 +214,7 @@ int ph_hold(void) { static int h = -1; if (h < 0) h = getenv("SB_PH_HOLD") != NU
 static char cardKey[80]; /* the card drawn now: "poster:<id>" (a poster flies to the title page's cover) */
 static void card_art(const char *src, float x, float y, float w, float h, float r, int wide, int loadArt, int *shown) {
   *shown = 0;
-  int fit = wide ? 1 : 0; GLuint tex = 0;                 /* posters fill the card as they are; wide art is cover-cropped */
+  int fit = wide ? 3 : 0; GLuint tex = 0;                 /* posters fill the card as they are; wide art is cover-cropped */
   if (src && *src && (loadArt || img_shaped_loaded(src, (int)w, (int)h, r, fit))) tex = img_get_shaped(src, (int)w, (int)h, r, fit);
   if (!src || !*src) { ph_surface(x, y, w, h, r); return; }
   if (!tex && img_shaped_failed(src, (int)w, (int)h, r, fit)) { ph_surface(x, y, w, h, r); *shown = -1; return; } /* nothing is coming: the surface stays still */
