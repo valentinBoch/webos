@@ -1,5 +1,6 @@
 #include "platform/plat.h"
 #include "ui/text.h"
+#include "ui/wrapbreak.h"
 #include <SDL2/SDL.h>
 #include "ui/gfx.h"
 #include "ui/atlas.h"
@@ -660,23 +661,36 @@ static int no_brk_after(uint32_t c) { return c == 0x300C || c == 0x300E || c == 
 static int brk_cjk(const uint32_t *c, int at, int p) { /* a break between c[p-1] and c[p] inside CJK text */
   return p > at && (is_cjk_brk(c[p - 1]) || is_cjk_brk(c[p])) && c[p] != ' ' && !no_brk_before(c[p]) && !no_brk_after(c[p - 1]) && !(c[p] < 0x80 && c[p - 1] < 0x80);
 }
+typedef struct { int px, weight; float tracking; } WrapMeasure;
+static float wrap_width(const uint32_t *cps, int at, int end, void *context) {
+  const WrapMeasure *m = context; char tmp[1024];
+  cps_to_utf8(cps + at, end - at, tmp, sizeof tmp);
+  return text_width(tmp, m->px, m->weight, m->tracking);
+}
 static int wrap_lines(const char *utf8, float maxW, int maxLines, int px, int weight, float tracking, char lines[][1024], int *ellipsisLast) {
   int n; uint32_t *cps = to_cps(utf8, &n, 0); int at = 0, nl = 0; *ellipsisLast = 0;
   int *cand = malloc((n + 1) * sizeof *cand);
   while (at < n && nl < maxLines) {
-    while (at < n && cps[at] == ' ') at++;
+    while (at < n && (cps[at] == ' ' || cps[at] == '\n')) at++;
     if (at >= n) break;
     /* where this line may end: spaces, the paragraph's end, and between CJK characters */
     int stop = at; while (stop < n && cps[stop] != '\n') stop++;
-    int nc = 0, cjk = 0;
-    for (int p = at + 1; p <= stop; p++) { if (p == stop || cps[p] == ' ') cand[nc++] = p; else if (brk_cjk(cps, at, p) && !cluster_cont(cps, p)) { cand[nc++] = p; cjk = 1; } }
+    int nc = 0;
+    for (int p = at + 1; p <= stop; p++) {
+      /* Prefer separators in release filenames, URLs and paths; never split a grapheme cluster. */
+      if (p == stop || (!cluster_cont(cps, p) &&
+          (cps[p] == ' ' || brk_cjk(cps, at, p) ||
+           cps[p - 1] == '.' || cps[p - 1] == '_' ||
+           cps[p - 1] == '-' || cps[p - 1] == '/'))) cand[nc++] = p;
+    }
     int fitEnd = -1; char tmp[1024];
-    (void)cjk; { /* the longest prefix that fits, found by halving (widths grow with the prefix; each try is shaped once);
-                   a single word wider than the line is cut by the ellipsis */
+    { /* Prefer the longest natural break which fits, otherwise hard-wrap an oversized token. */
       int lo = 0, hi = nc - 1, best = -1;
-      while (lo <= hi) { int mid = (lo + hi) / 2; cps_to_utf8(cps + at, cand[mid] - at, tmp, sizeof tmp);
+      while (lo <= hi) { int mid = lo + (hi - lo) / 2; cps_to_utf8(cps + at, cand[mid] - at, tmp, sizeof tmp);
         if (text_width(tmp, px, weight, tracking) <= maxW) { best = mid; lo = mid + 1; } else hi = mid - 1; }
-      fitEnd = best >= 0 ? cand[best] : cand[0];
+      if (best >= 0) fitEnd = cand[best];
+      else { WrapMeasure m = { px, weight, tracking };
+        fitEnd = wrapbreak_fit(cps, at, cand[0], maxW, wrap_width, cluster_cont, &m); }
     }
     if (fitEnd <= at) fitEnd = stop > at ? stop : at + 1;
     cps_to_utf8(cps + at, fitEnd - at, lines[nl], 1024); nl++;
